@@ -26,7 +26,6 @@ download_if_not_exists() {
         echo " -> 이미 다운로드된 [$filename] 파일을 재사용합니다."
     else
         echo " -> [$filename] 파일을 다운로드합니다."
-        # CentOS 7의 wget 구버전을 위해 --show-progress 옵션 제거
         wget "$url" || error_exit "[$filename] 다운로드에 실패했습니다. 네트워크 상태나 링크를 확인해 주십시오."
     fi
 }
@@ -40,14 +39,26 @@ cleanup_temp_files() {
     echo " -> 찌꺼기 파일 청소가 완료되었습니다."
 }
 
-# --- [저장소 강력 패치 함수] ---
+# --- [저장소 강력 패치 함수 (중복 실행 방지 적용)] ---
 patch_all_repos() {
+    local step=$1
+    local marker="/etc/yum.repos.d/.repo_patched_step${step}"
+
+    if [ -f "$marker" ]; then
+        echo " -> 💡 ${step}차 저장소 패치가 이미 적용되어 있어 건너뜁니다."
+        return 0
+    fi
+
+    echo " -> 시스템 내 저장소를 Vault 주소로 치환합니다. (${step}차)"
     sed -i 's|^mirrorlist=|#mirrorlist=|g' /etc/yum.repos.d/*.repo 2>/dev/null || true
     sed -i 's|^metalink=|#metalink=|g' /etc/yum.repos.d/*.repo 2>/dev/null || true
     sed -i 's|^#baseurl=|baseurl=|g' /etc/yum.repos.d/*.repo 2>/dev/null || true
     sed -i 's|^# baseurl=|baseurl=|g' /etc/yum.repos.d/*.repo 2>/dev/null || true
     sed -i 's|http://mirror.centos.org|http://vault.centos.org|g' /etc/yum.repos.d/*.repo 2>/dev/null || true
     sed -i 's|http://download.fedoraproject.org/pub/epel|https://archives.fedoraproject.org/pub/archive/epel|g' /etc/yum.repos.d/*.repo 2>/dev/null || true
+    
+    yum clean all
+    touch "$marker"
 }
 
 # --- [사전 체크 단계] ---
@@ -94,20 +105,16 @@ echo "--------------------------------------------------------"
 echo "[작업 1] 패키지 저장소 복구 및 컴파일러 업데이트를 진행합니다."
 
 # 1-1. 기존에 남아있는 모든 저장소 찌꺼기 1차 패치
-echo " -> 시스템 내 모든 저장소를 Vault 주소로 1차 패치합니다."
-patch_all_repos
-yum clean all
+patch_all_repos 1
 
 # 1-2. 필수 확장 저장소 패키지 설치
 yum install -y --nogpgcheck --disablerepo=*wandisco*,*icinga* epel-release centos-release-scl || error_exit "기본 저장소(epel, scl) 패키지 설치에 실패했습니다."
 
 # 1-3. 새로 설치된 확장 저장소에 대해 2차 패치
-echo " -> 신규 설치된 확장 저장소에 대해 2차 Vault 패치를 진행합니다."
-patch_all_repos
-yum clean all
+patch_all_repos 2
 
-# 1-4. 컴파일러 및 빌드 도구 설치 (rpm2cpio 제거)
-yum install -y --nogpgcheck --disablerepo=*wandisco*,*icinga* devtoolset-8-gcc devtoolset-8-gcc-c++ devtoolset-8-binutils bison python3 wget bzip2 patchelf gawk cpio || error_exit "컴파일에 필요한 필수 패키지 설치에 실패했습니다."
+# 1-4. 컴파일러 및 빌드 도구 설치 (texinfo 추가)
+yum install -y --nogpgcheck --disablerepo=*wandisco*,*icinga* devtoolset-8-gcc devtoolset-8-gcc-c++ devtoolset-8-binutils bison python3 wget bzip2 patchelf gawk cpio texinfo || error_exit "컴파일에 필요한 필수 패키지 설치에 실패했습니다."
 
 source /opt/rh/devtoolset-8/enable || error_exit "GCC 8 (devtoolset-8) 활성화에 실패했습니다."
 
@@ -130,6 +137,9 @@ download_if_not_exists "http://ftp.gnu.org/gnu/libc/glibc-$GLIBC_VERSION.tar.gz"
 tar -xzf glibc-$GLIBC_VERSION.tar.gz || error_exit "glibc 2.28 압축 해제에 실패했습니다."
 mkdir -p glibc-$GLIBC_VERSION/build
 cd glibc-$GLIBC_VERSION/build
+
+# glibc 보안 정책에 걸리지 않도록 환경 변수 초기화
+unset LD_LIBRARY_PATH
 
 MAKE=/usr/local/bin/make ../configure --prefix=$INSTALL_PREFIX --disable-werror || error_exit "glibc 2.28 환경 설정(configure)에 실패했습니다."
 /usr/local/bin/make -j"$(nproc)" || error_exit "glibc 2.28 컴파일(make)에 실패했습니다."
