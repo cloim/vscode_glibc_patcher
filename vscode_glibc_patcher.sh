@@ -26,7 +26,7 @@ download_if_not_exists() {
         echo " -> 이미 다운로드된 [$filename] 파일을 재사용합니다."
     else
         echo " -> [$filename] 파일을 다운로드합니다."
-        wget "$url" || error_exit "[$filename] 다운로드에 실패했습니다. 네트워크 상태나 링크를 확인해 주십시오."
+        wget -q --show-progress "$url" || wget "$url" || error_exit "[$filename] 다운로드에 실패했습니다."
     fi
 }
 
@@ -39,26 +39,27 @@ cleanup_temp_files() {
     echo " -> 찌꺼기 파일 청소가 완료되었습니다."
 }
 
-# --- [저장소 강력 패치 함수 (중복 실행 방지 적용)] ---
+# --- [저장소 강력 패치 함수 (마커 확인 제거, 무조건 덮어쓰기)] ---
 patch_all_repos() {
     local step=$1
-    local marker="/etc/yum.repos.d/.repo_patched_step${step}"
 
-    if [ -f "$marker" ]; then
-        echo " -> 💡 ${step}차 저장소 패치가 이미 적용되어 있어 건너뜁니다."
-        return 0
-    fi
-
-    echo " -> 시스템 내 저장소를 Vault 주소로 치환합니다. (${step}차)"
-    sed -i 's|^mirrorlist=|#mirrorlist=|g' /etc/yum.repos.d/*.repo 2>/dev/null || true
-    sed -i 's|^metalink=|#metalink=|g' /etc/yum.repos.d/*.repo 2>/dev/null || true
-    sed -i 's|^#baseurl=|baseurl=|g' /etc/yum.repos.d/*.repo 2>/dev/null || true
-    sed -i 's|^# baseurl=|baseurl=|g' /etc/yum.repos.d/*.repo 2>/dev/null || true
-    sed -i 's|http://mirror.centos.org|http://vault.centos.org|g' /etc/yum.repos.d/*.repo 2>/dev/null || true
-    sed -i 's|http://download.fedoraproject.org/pub/epel|https://archives.fedoraproject.org/pub/archive/epel|g' /etc/yum.repos.d/*.repo 2>/dev/null || true
+    echo " -> 시스템 내 저장소를 Vault 주소로 강제 치환합니다. (${step}차)"
     
+    # 1. 방해꾼 fastestmirror 플러그인 영구 비활성화
+    sed -i -E 's/^enabled[[:space:]]*=[[:space:]]*1/enabled=0/' /etc/yum/pluginconf.d/fastestmirror.conf 2>/dev/null || true
+
+    # 2. 모든 repo에 대해 mirrorlist/metalink 비활성화 및 baseurl 활성화
+    sed -i -E 's/^[[:space:]]*(mirrorlist|metalink)/#\1/g' /etc/yum.repos.d/*.repo 2>/dev/null || true
+    sed -i -E 's/^[[:space:]]*#[[:space:]]*baseurl/baseurl/g' /etc/yum.repos.d/*.repo 2>/dev/null || true
+    
+    # 3. CentOS Base & SCL 도메인 강력 치환 (모든 패턴 방어)
+    sed -i -E 's|baseurl[[:space:]]*=.*centos/(\$releasever|7)/|baseurl=http://vault.centos.org/centos/7/|g' /etc/yum.repos.d/CentOS-*.repo 2>/dev/null || true
+    sed -i 's|http://mirror.centos.org|http://vault.centos.org|g' /etc/yum.repos.d/*.repo 2>/dev/null || true
+
+    # 4. EPEL 도메인 강력 치환 (download.example 등 원천 차단)
+    sed -i -E 's|baseurl[[:space:]]*=.*epel/|baseurl=https://archives.fedoraproject.org/pub/archive/epel/|g' /etc/yum.repos.d/epel*.repo 2>/dev/null || true
+
     yum clean all
-    touch "$marker"
 }
 
 # --- [사전 체크 단계] ---
@@ -107,14 +108,14 @@ echo "[작업 1] 패키지 저장소 복구 및 컴파일러 업데이트를 진
 # 1-1. 기존에 남아있는 모든 저장소 찌꺼기 1차 패치
 patch_all_repos 1
 
-# 1-2. 필수 확장 저장소 패키지 설치
-yum install -y --nogpgcheck --disablerepo=*wandisco*,*icinga* epel-release centos-release-scl || error_exit "기본 저장소(epel, scl) 패키지 설치에 실패했습니다."
+# 1-2. 필수 확장 저장소 패키지 설치 (불필요한 외부 저장소 완벽 차단)
+yum install -y --nogpgcheck --disablerepo=* --enablerepo=base,extras,updates epel-release centos-release-scl || error_exit "기본 저장소(epel, scl) 패키지 설치에 실패했습니다."
 
 # 1-3. 새로 설치된 확장 저장소에 대해 2차 패치
 patch_all_repos 2
 
-# 1-4. 컴파일러 및 빌드 도구 설치 (texinfo 추가)
-yum install -y --nogpgcheck --disablerepo=*wandisco*,*icinga* devtoolset-8-gcc devtoolset-8-gcc-c++ devtoolset-8-binutils bison python3 wget bzip2 patchelf gawk cpio texinfo || error_exit "컴파일에 필요한 필수 패키지 설치에 실패했습니다."
+# 1-4. 컴파일러 및 빌드 도구 설치 (불필요한 외부 저장소 완벽 차단)
+yum install -y --nogpgcheck --disablerepo=* --enablerepo=base,extras,updates,epel,centos-sclo-rh,centos-sclo-sclo devtoolset-8-gcc devtoolset-8-gcc-c++ devtoolset-8-binutils bison python3 wget bzip2 patchelf gawk cpio texinfo || error_exit "컴파일에 필요한 필수 패키지 설치에 실패했습니다."
 
 source /opt/rh/devtoolset-8/enable || error_exit "GCC 8 (devtoolset-8) 활성화에 실패했습니다."
 
